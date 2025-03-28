@@ -2,56 +2,86 @@ name: Build Obfuscate BPB Panel
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
   schedule:
-        # Runs everyday at 1:00 AM
-        - cron: "0 1 * * *"
+    - cron: '0 1 * * *'  # 每日凌晨1点执行
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # 使用新版系统镜像
+    timeout-minutes: 10    # 设置超时阈值
 
     steps:
-      - name: Check out the code
+      - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1   # 浅层克隆加速
 
-      - name: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "latest"
+          node-version: '20'  # 固定Node版本
+          cache: 'npm'        # 启用缓存
 
       - name: Install dependencies
         run: |
-          npm install -g javascript-obfuscator
+          npm install -g \
+            javascript-obfuscator@4.0.0 \
+            terser@5.27.0     # 固定版本确保稳定性
 
-      - name: Clone BPB workjs
+      - name: Prepare workspace
         run: |
-          wget -O origin.js https://raw.githubusercontent.com/bia-pain-bache/BPB-Worker-Panel/refs/heads/main/build/unobfuscated-worker.js
+          mkdir -p dist && 
+          rm -f _worker.js    # 清理旧构建产物
 
-      - name: Obfuscate BPB worker js
+      - name: Download source
         run: |
-          javascript-obfuscator origin.js --output _worker.js \
-          --compact true \
-          --control-flow-flattening true \
-          --control-flow-flattening-threshold 1 \
-          --dead-code-injection true \
-          --dead-code-injection-threshold 1 \
-          --identifier-names-generator hexadecimal \
-          --rename-globals true \
-          --string-array true \
-          --string-array-encoding 'rc4' \
-          --string-array-threshold 1 \
-          --transform-object-keys true \
-          --unicode-escape-sequence true
+          wget -q --show-progress \
+            -O origin.js \
+            "https://raw.githubusercontent.com/bia-pain-bache/BPB-Worker-Panel/main/build/unobfuscated-worker.js"
+          
+          # 验证文件完整性
+          if [ ! -s origin.js ]; then
+            echo "::error::Source file download failed"
+            exit 1
+          fi
+
+      - name: Minify code (Terser)
+        run: |
+          terser origin.js \
+            --compress drop_console=true \
+            --mangle toplevel=true \
+            -o minified.js
+          
+          echo "Original size: $(wc -c < origin.js) bytes"
+          echo "Minified size: $(wc -c < minified.js) bytes"
+
+      - name: Obfuscate code
+        run: |
+          javascript-obfuscator minified.js \
+            --output _worker.js \
+            --compact true \
+            --identifier-names-generator hexadecimal \
+            --string-array true \
+            --string-array-encoding base64 \
+            --string-array-threshold 0.75 \
+            --rename-globals false \
+            --simplify true \
+            --transform-object-keys false
+          
+          # 生成校验文件
+          sha256sum _worker.js > dist/checksum.sha256
 
       - name: Commit changes
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           branch: main
-          commit_message: ':arrow_up: update latest bpb panel'
-          commit_author: 'github-actions[bot] <github-actions[bot]@users.noreply.github.com>'
-          push_options: '--set-upstream'
+          commit_message: ':zap: optimize BPB worker build'
+          commit_author: 'BPB Builder <noreply@bpb.com>'
+          push_options: '--force'
+          file_pattern: |  # 精确指定变更文件
+            _worker.js
+            dist/checksum.sha256
